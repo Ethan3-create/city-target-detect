@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Training outputs
+weights/
+outputs/
+runs/
+wandb/
+
+# Data (do not upload dataset)
+data/
+*.zip
+!requirements.txt
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# PyTorch
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Temporary
+*.tmp
+*.log

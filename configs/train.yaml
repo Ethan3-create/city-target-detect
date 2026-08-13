@@ -1,0 +1,115 @@
+# ========================================
+# 多模态目标检测 - 训练配置文件
+# 与官方赛题规则完全对齐（12 类顺序不可更改）
+# ========================================
+
+# ---- 数据配置 ----
+# data_root 指向包含 train/val/test 的数据集根目录
+#   目录结构: {data_root}/train/{visible,infrared,depth,labels}
+#             {data_root}/val/{visible,infrared,depth,labels}
+#             {data_root}/test/{visible,infrared,depth}
+data_root: "data"
+img_size: 640
+num_classes: 12
+batch_size: 16            # 24GB 显存建议 16；显存不足时改小并开启 gradient_accum
+num_workers: 4
+val_split: 0.15           # 从 train 划分验证集比例（与 scripts/01_preprocess.py 保持一致）
+
+# ---- 模型配置 ----
+# 融合策略:
+#   early      : 早期融合（RGB+IR+Depth 拼接为 5 通道输入，最简单、最快，适合快速基线）
+#   stage_gate : 中期融合（三模态独立 Stem + 分层门控融合，本项目核心方案，推荐）
+fusion_mode: "stage_gate"
+model_size: "n"           # n / s / m (YOLOv8 n/s/m 通道配置)
+device: "cuda"            # cuda / cpu（自动回退）
+pretrained: true          # 是否加载 COCO 预训练权重（yolov8n.pt / yolov8s.pt / yolov8m.pt）
+pretrained_path: ""       # 自定义预训练权重路径（留空则用 ultralytics 自动下载）
+resume: ""                # 从 checkpoint 恢复训练（.pt 路径，留空表示从头训练）
+
+# ---- 模态配置 ----
+use_aux: true             # 使用伪模态辅助监督（IR 对比 / Depth 掩码 / Depth 法向）
+modal_dropout_prob: 0.3   # 训练时模态 Dropout 概率（提升模态缺失鲁棒性）
+
+# ---- 两阶段训练 ----
+# 第一阶段：冻结共享主干，只训练新增模块（融合/检测头/辅助头）
+stage1_epochs: 15
+stage1_lr: 0.001
+# 第二阶段：全网络解冻微调
+stage2_epochs: 30
+stage2_lr: 0.0001
+
+# ---- 损失权重（YOLOv8 标准 + 辅助损失）----
+loss:
+  box: 7.5               # bbox 回归权重
+  cls: 0.5               # 分类权重
+  dfl: 1.5               # DFL 分布焦点损失权重
+  aux_weights:           # 辅助监督各分支权重（相对主损失）
+    ir_contrast: 0.30
+    depth_mask: 0.20
+    depth_normal: 0.15
+  total_aux: 0.15        # 辅助总损失整体缩放
+
+# ---- 优化器 ----
+optimizer: "adamw"
+weight_decay: 0.0005
+grad_clip: 10.0
+gradient_accum: 1        # 梯度累积步数（等效 batch = batch_size * gradient_accum）
+amp: true                # 混合精度训练（GPU 可用时）
+
+# ---- 学习率调度 ----
+lr_scheduler: "cosine"
+warmup_epochs: 3
+
+# ---- 早停 ----
+early_stopping: true
+patience: 10             # 连续 N 轮验证集 mAP 无提升则停止
+
+# ---- 验证 ----
+val_interval: 1          # 每 N 轮验证一次
+ema: true                # 指数移动平均权重（提升稳定性）
+
+# ---- 保存路径 ----
+checkpoint_dir: "weights/checkpoints"
+best_model_dir: "weights/best"
+log_dir: "outputs/logs"
+
+# ---- 类别名称（官方 12 类，顺序 = 类别 ID 0~11，禁止修改）----
+class_names:
+  - "person"
+  - "boat"
+  - "animal"
+  - "seat"
+  - "sign"
+  - "bicycle"
+  - "car"
+  - "ball"
+  - "light"
+  - "garbagecan"
+  - "uav"
+  - "tricycle"
+
+# ---- 预处理参数 ----
+preprocess:
+  ir_kernel_size: 15        # IR 局部均值滤波核大小（温度对比图）
+  depth_min_mm: 300         # 最小有效深度 30cm
+  depth_max_mm: 20000       # 最大有效深度 20m
+
+# ---- 数据增强 ----
+augment:
+  hsv_h: 0.015             # 色调抖动
+  hsv_s: 0.7               # 饱和度抖动
+  hsv_v: 0.4               # 亮度抖动
+  flip_lr: 0.5             # 水平翻转概率
+  scale: 0.5               # 缩放幅度
+  mosaic: 0.0              # Mosaic 概率（多模态同步版，默认关闭避免实现差异；可开启 0.5~1.0）
+  mixup: 0.0               # MixUp 概率
+
+# ---- 推理配置 ----
+inference:
+  conf_threshold: 0.001    # 提交建议用极低阈值，靠 NMS 过滤
+  nms_iou_threshold: 0.5
+  max_det: 100             # 竞赛单图最大 100 个预测框
+  use_soft_nms: true
+  use_tta: false
+  tta_scales: [640, 800, 960]
+  tta_flip: true
