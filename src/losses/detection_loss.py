@@ -148,7 +148,8 @@ class MultiModalDetectionLoss(nn.Module):
     """
 
     def __init__(self, model, box_w=7.5, cls_w=0.5, dfl_w=1.5,
-                 aux_weights=None, tal_topk=13, tal_alpha=0.5, tal_beta=6.0):
+                 aux_weights=None, tal_topk=13, tal_alpha=0.5, tal_beta=6.0,
+                 class_weights=None):
         super().__init__()
         device = next(model.parameters()).device
         head = model.head
@@ -163,6 +164,14 @@ class MultiModalDetectionLoss(nn.Module):
         self.box_w = box_w
         self.cls_w = cls_w
         self.dfl_w = dfl_w
+
+        # 类别重加权（缓解类别不平衡）: [nc] 或 None
+        if class_weights is not None:
+            self.register_buffer(
+                "class_weights",
+                torch.as_tensor(class_weights, dtype=torch.float, device=device))
+        else:
+            self.class_weights = None
 
         self.assigner = _TALAssigner(
             topk=tal_topk, num_classes=self.nc,
@@ -264,8 +273,18 @@ class MultiModalDetectionLoss(nn.Module):
             dfl_loss = pred_distri.sum() * 0.0
 
         # ---- 分类损失（BCE，全部锚点）----
-        cls_loss = self.bce(pred_scores, target_scores.to(pred_scores.dtype)).sum() \
-            / target_scores_sum
+        if self.class_weights is not None:
+            # 类别重加权：正样本锚点按其目标类别的权重放大梯度
+            pos_cls = target_scores.argmax(-1)               # [B, N] 目标类别
+            pos_mask = target_scores.sum(-1) > 0             # [B, N] 正锚点
+            anchor_w = torch.ones_like(target_scores.sum(-1))
+            if pos_mask.any():
+                anchor_w[pos_mask] = self.class_weights[pos_cls[pos_mask]]
+            bce_all = self.bce(pred_scores, target_scores.to(pred_scores.dtype))
+            cls_loss = (bce_all * anchor_w.unsqueeze(-1)).sum() / target_scores_sum
+        else:
+            cls_loss = self.bce(pred_scores, target_scores.to(pred_scores.dtype)).sum() \
+                / target_scores_sum
 
         # ---- 辅助损失 ----
         aux_loss_total = torch.tensor(0.0, device=self.device)

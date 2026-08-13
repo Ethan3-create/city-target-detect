@@ -1,0 +1,106 @@
+# ========================================
+# 多模态目标检测 - GPU 训练配置（RTX 4060 Laptop 8GB）
+# 全量 1700 训练样本，两阶段 45 epochs，YOLOv8-s 骨架
+# ========================================
+
+# ---- 数据配置 ----
+data_root: "../dataset"
+img_size: 640
+num_classes: 12
+batch_size: 8            # 冒烟测试显存仅 1GB，yolov8s 可用 batch 8；配合 gradient_accum=2 等效 16
+num_workers: 4
+val_split: 0.15
+
+# ---- 模型配置 ----
+fusion_mode: "stage_gate"
+model_size: "s"
+device: "cuda"            # GPU 训练
+pretrained: true
+pretrained_path: "weights/yolov8s.pt"
+resume: ""
+
+# ---- 模态配置 ----
+use_aux: true
+modal_dropout_prob: 0.3
+
+# ---- 两阶段训练（全量）----
+stage1_epochs: 15
+stage1_lr: 0.001
+stage2_epochs: 30
+stage2_lr: 0.0001
+
+# ---- 损失权重 ----
+loss:
+  box: 7.5
+  cls: 0.5
+  dfl: 1.5
+  aux_weights:
+    ir_contrast: 0.30
+    depth_mask: 0.20
+    depth_normal: 0.15
+  total_aux: 0.15
+
+# ---- 优化器 ----
+optimizer: "adamw"
+weight_decay: 0.0005
+grad_clip: 10.0
+gradient_accum: 2        # 等效 batch = 16
+amp: true                # 混合精度（GPU 关键加速）
+
+# ---- 学习率调度 ----
+lr_scheduler: "cosine"
+warmup_epochs: 3
+
+# ---- 早停 ----
+early_stopping: true
+patience: 10
+
+# ---- 验证 ----
+val_interval: 1
+ema: true
+
+# ---- 保存路径 ----
+checkpoint_dir: "weights/checkpoints"
+best_model_dir: "weights/best"
+log_dir: "outputs/logs"
+
+# ---- 类别名称（官方 12 类，顺序 = 类别 ID 0~11，禁止修改）----
+class_names:
+  - "person"
+  - "boat"
+  - "animal"
+  - "seat"
+  - "sign"
+  - "bicycle"
+  - "car"
+  - "ball"
+  - "light"
+  - "garbagecan"
+  - "uav"
+  - "tricycle"
+
+# ---- 预处理参数 ----
+preprocess:
+  ir_kernel_size: 15
+  depth_min_mm: 300
+  depth_max_mm: 20000
+
+# ---- 数据增强 ----
+augment:
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  flip_lr: 0.5
+  scale: 0.5
+  mosaic: 0.0
+  mixup: 0.0
+
+# ---- 推理配置 ----
+inference:
+  conf_threshold: 0.001
+  nms_iou_threshold: 0.5
+  max_det: 100
+  use_soft_nms: true
+  use_tta: false
+  tta_scales: [640, 800, 960]
+  tta_flip: true

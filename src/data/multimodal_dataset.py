@@ -44,7 +44,9 @@ class MultiModalDataset(Dataset):
     def __init__(self, data_root: str, split: str = "train", img_size: int = 640,
                  use_aux: bool = True, modal_dropout_prob: float = 0.3,
                  is_training: bool = True, cache_processed: bool = True,
-                 flip_prob: float = 0.5, scale: float = 0.5, seed: int = 0):
+                 flip_prob: float = 0.5, scale: float = 0.5, seed: int = 0,
+                 paste_aug: bool = False, paste_classes=None,
+                 paste_prob: float = 0.5, paste_max_objs: int = 2):
         self.data_root = Path(data_root)
         self.split = split
         self.img_size = img_size
@@ -54,6 +56,12 @@ class MultiModalDataset(Dataset):
         self.cache_processed = cache_processed
         self.flip_prob = flip_prob
         self.scale = scale
+        # 复制粘贴增强（弱类别平衡）
+        self.paste_aug = paste_aug and is_training
+        self.paste_classes = list(paste_classes or [])
+        self.paste_prob = paste_prob
+        self.paste_max_objs = paste_max_objs
+        self._paste_pool = None  # 懒构建
 
         self.split_dir = self.data_root / split
         self.rgb_dir = self.split_dir / MODALITY_DIRS["rgb"]
@@ -113,6 +121,9 @@ class MultiModalDataset(Dataset):
         # ---- 训练时同步增强（像素空间）----
         if self.is_training:
             rgb, ir, depth, xyxy = self._sync_augment(rgb, ir, depth, xyxy)
+            # 复制粘贴增强（弱类别对象注入，须在 letterbox 像素空间做）
+            if self.paste_aug:
+                rgb, ir, depth, xyxy = self._paste_augment(rgb, ir, depth, xyxy)
 
         # ---- 模态 Dropout ----
         if self.is_training and np.random.rand() < self.modal_dropout_prob:
@@ -238,6 +249,122 @@ class MultiModalDataset(Dataset):
         else:
             depth[:] = 0  # 无效深度
         return rgb, ir, depth
+
+    # ==================== 复制粘贴增强（类别平衡） ====================
+
+    def _build_paste_pool(self):
+        """
+        从训练集构建弱类别对象库（懒加载）：
+        遍历 train/ 标签，收集 paste_classes 中各类别的三模态对象 patch。
+        patch 从原图（未 letterbox）裁剪，粘贴时再 resize 到目标大小。
+        Returns:
+            list of dict(cls, rgb, ir, depth, h, w) —— 原始像素 patch
+        """
+        pool = []
+        val_excluded = set()
+        val_list_path = self.data_root / "val_stems.txt"
+        if val_list_path.exists():
+            val_excluded = {l.strip() for l in val_list_path.open() if l.strip()}
+
+        label_dir = self.data_root / "train" / MODALITY_DIRS["labels"]
+        rgb_dir = self.data_root / "train" / MODALITY_DIRS["rgb"]
+        ir_dir = self.data_root / "train" / MODALITY_DIRS["ir"]
+        dp_dir = self.data_root / "train" / MODALITY_DIRS["depth"]
+
+        import glob
+        label_files = sorted(glob.glob(str(label_dir / "*.txt")))
+        n_sel = 0
+        for lp in label_files:
+            stem = Path(lp).stem
+            if stem in val_excluded:
+                continue
+            lbl = load_labels(lp)
+            if len(lbl) == 0:
+                continue
+            sel = [int(r[0]) for r in lbl if int(r[0]) in self.paste_classes]
+            if not sel:
+                continue
+            # 每个类别最多取若干实例，控制库大小
+            need = any(self._paste_class_count(pool, c) < 40 for c in set(sel))
+            if not need:
+                continue
+            rgb = load_rgb(find_file(rgb_dir, stem))
+            ir = load_ir(find_file(ir_dir, stem))
+            depth = load_depth(find_file(dp_dir, stem))
+            H, W = rgb.shape[:2]
+            for row in lbl:
+                c = int(row[0])
+                if c not in self.paste_classes:
+                    continue
+                if self._paste_class_count(pool, c) >= 40:
+                    continue
+                cx, cy, w, h = row[1:5]
+                x1 = int((cx - w / 2) * W)
+                y1 = int((cy - h / 2) * H)
+                x2 = int((cx + w / 2) * W)
+                y2 = int((cy + h / 2) * H)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(W, x2), min(H, y2)
+                if x2 - x1 < 8 or y2 - y1 < 8:
+                    continue
+                ir_r = ir if ir.ndim == 2 else ir[:, :, 0]
+                pool.append({
+                    "cls": c,
+                    "rgb": rgb[y1:y2, x1:x2].copy(),
+                    "ir": ir_r[y1:y2, x1:x2].copy(),
+                    "depth": depth[y1:y2, x1:x2].copy(),
+                    "h": y2 - y1, "w": x2 - x1,
+                })
+                n_sel += 1
+        print(f"  [paste] 对象库构建完成: {len(pool)} 个弱类别对象"
+              f"（类别 {sorted(set(p['cls'] for p in pool))}）")
+        return pool
+
+    @staticmethod
+    def _paste_class_count(pool, cls):
+        return sum(1 for p in pool if p["cls"] == cls)
+
+    def _paste_augment(self, rgb, ir, depth, xyxy):
+        """
+        复制粘贴增强：随机从对象库取 1~paste_max_objs 个弱类别对象，
+        随机缩放(0.4~1.3)/随机位置粘贴到 640 画布，三模态同步，标签同步追加。
+        """
+        if self._paste_pool is None:
+            self._paste_pool = self._build_paste_pool()
+        pool = self._paste_pool
+        if len(pool) == 0 or np.random.rand() >= self.paste_prob:
+            return rgb, ir, depth, xyxy
+
+        H, W = rgb.shape[:2]
+        n_paste = np.random.randint(1, self.paste_max_objs + 1)
+        new_rows = []
+        for _ in range(n_paste):
+            obj = pool[np.random.randint(len(pool))]
+            oh, ow = obj["h"], obj["w"]
+            # 随机缩放（保持宽高比），限制尺寸避免过大遮挡
+            s = np.random.uniform(0.4, 1.3)
+            pw = max(12, int(ow * s))
+            ph = max(12, int(oh * s))
+            if pw >= W or ph >= H:
+                continue
+            # 随机位置（完整落在画布内）
+            x = np.random.randint(0, W - pw)
+            y = np.random.randint(0, H - ph)
+            # 三模态同步粘贴
+            rgb[y:y + ph, x:x + pw] = cv2.resize(obj["rgb"], (pw, ph),
+                                                 interpolation=cv2.INTER_LINEAR)
+            ir_p = cv2.resize(obj["ir"], (pw, ph), interpolation=cv2.INTER_NEAREST)
+            if ir.ndim == 3:
+                ir[y:y + ph, x:x + pw, 0] = ir_p
+            else:
+                ir[y:y + ph, x:x + pw] = ir_p
+            depth[y:y + ph, x:x + pw] = cv2.resize(
+                obj["depth"], (pw, ph), interpolation=cv2.INTER_NEAREST)
+            new_rows.append([float(obj["cls"]), x, y, x + pw, y + ph])
+
+        if new_rows:
+            xyxy = np.concatenate([xyxy, np.array(new_rows, dtype=np.float32)], 0)
+        return rgb, ir, depth, xyxy
 
     # ==================== 伪模态 ====================
 

@@ -265,3 +265,53 @@ def visualize_multimodal(rgb: np.ndarray, ir: np.ndarray, depth: np.ndarray,
     if save_path:
         cv2.imwrite(str(save_path), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
     return canvas
+
+
+# ==================== 类别不平衡处理 ====================
+
+def count_class_freq(data_root, split="train", exclude_val=True):
+    """
+    统计数据集各类别标注框频次（框数，非样本数）。
+
+    Returns:
+        counts: np.ndarray [num_classes_known=12] 若无标签则全 0
+    """
+    root = Path(data_root)
+    label_dir = root / split / MODALITY_DIRS["labels"]
+    if not label_dir.exists():
+        return np.zeros(12, dtype=np.int64)
+
+    stems = get_aligned_stems(root, split)
+    if split == "train" and exclude_val:
+        val_list_path = root / "val_stems.txt"
+        if val_list_path.exists():
+            val_stems = {line.strip() for line in val_list_path.open() if line.strip()}
+            stems = [s for s in stems if s not in val_stems]
+
+    counts = np.zeros(12, dtype=np.int64)
+    for stem in stems:
+        lbl = load_labels(label_dir / f"{stem}.txt")
+        for cls in lbl[:, 0]:
+            c = int(cls)
+            if 0 <= c < 12:
+                counts[c] += 1
+    return counts
+
+
+def compute_class_weights(counts, max_ratio=6.0, power=0.5):
+    """
+    由类别框频次计算重加权系数（缓解类别不平衡）。
+
+    策略：低频类放大（sqrt 逆频率，限制 max_ratio 倍），高频类保持 1.0
+      w_c = clip( (max(counts) / counts_c) ** power, 1.0, max_ratio )
+    使用最频类为基准（而非均值），避免多数类被压低。
+    """
+    counts = np.asarray(counts, dtype=np.float64)
+    nc = len(counts)
+    if counts.sum() == 0:
+        return np.ones(nc, dtype=np.float32)
+    base = counts.max()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = np.where(counts > 0, (base / np.maximum(counts, 1)) ** power, 1.0)
+    w = np.clip(w, 1.0, max_ratio)
+    return w.astype(np.float32)

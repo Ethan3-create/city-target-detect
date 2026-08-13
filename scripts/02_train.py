@@ -341,12 +341,17 @@ def main():
     print(f"  图片尺寸: {cfg['img_size']}")
 
     # ---- 数据集 ----
+    aug_cfg = cfg.get("augment", {})
     train_ds = MultiModalDataset(
         data_root=data_root, split="train", img_size=cfg["img_size"],
         use_aux=cfg.get("use_aux", True),
         modal_dropout_prob=cfg.get("modal_dropout_prob", 0.3),
         is_training=True, cache_processed=True,
-        flip_prob=cfg["augment"]["flip_lr"], scale=cfg["augment"]["scale"],
+        flip_prob=aug_cfg.get("flip_lr", 0.5), scale=aug_cfg.get("scale", 0.5),
+        paste_aug=aug_cfg.get("paste", False),
+        paste_classes=aug_cfg.get("paste_classes", None),
+        paste_prob=aug_cfg.get("paste_prob", 0.5),
+        paste_max_objs=aug_cfg.get("paste_max_objs", 2),
     )
     val_ds = MultiModalDataset(
         data_root=data_root, split="val", img_size=cfg["img_size"],
@@ -398,11 +403,30 @@ def main():
 
     # ---- 损失 ----
     loss_cfg = cfg.get("loss", {})
+    # 类别重加权（缓解类别不平衡）：config 显式给出则用之，否则按训练集频次自动计算
+    class_weights = None
+    if loss_cfg.get("class_balance", False):
+        from src.utils.io_utils import compute_class_weights, count_class_freq
+        counts = count_class_freq(data_root, "train", exclude_val=True)
+        class_weights = compute_class_weights(
+            counts,
+            max_ratio=loss_cfg.get("class_max_ratio", 6.0),
+            power=loss_cfg.get("class_power", 0.5),
+        )
+        names = cfg.get("class_names", [])
+        brief = {names[i] if i < len(names) else str(i): round(float(w), 2)
+                 for i, w in enumerate(class_weights)}
+        print(f"  类别重加权: {brief}")
+    elif loss_cfg.get("class_weights"):
+        class_weights = loss_cfg["class_weights"]
+        print(f"  类别重加权(手动): {class_weights}")
+
     loss_fn = MultiModalDetectionLoss(
         model, box_w=loss_cfg.get("box", 7.5), cls_w=loss_cfg.get("cls", 0.5),
         dfl_w=loss_cfg.get("dfl", 1.5),
         aux_weights=loss_cfg.get("aux_weights", {}),
         tal_topk=13,
+        class_weights=class_weights,
     )
 
     # ---- EMA ----

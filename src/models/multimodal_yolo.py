@@ -36,19 +36,21 @@ class _BaseMultiModalModel(nn.Module):
 
     def _init_strides(self, dummy_rgb=None):
         """通过一次前向计算各尺度 stride（标准结构为 8/16/32）"""
+        device = next(self.parameters()).device
         self.eval()
         with torch.no_grad():
             if dummy_rgb is None:
                 h, w = 64, 64
-                rgb = torch.zeros(1, 3, h, w)
-                ir = torch.zeros(1, 1, h, w)
-                depth = torch.zeros(1, 1, h, w)
+                rgb = torch.zeros(1, 3, h, w, device=device)
+                ir = torch.zeros(1, 1, h, w, device=device)
+                depth = torch.zeros(1, 1, h, w, device=device)
             else:
                 rgb, ir, depth = dummy_rgb
+                rgb, ir, depth = rgb.to(device), ir.to(device), depth.to(device)
                 h, w = rgb.shape[2:]
             feats = self._extract(rgb, ir, depth)
             strides = [round(h / f.shape[2]) for f in feats]
-        self.head.stride = torch.tensor(strides)
+        self.head.stride = torch.tensor(strides, device=device)
         self.train()
         return strides
 
@@ -215,7 +217,8 @@ def load_pretrained_weights(model: nn.Module, weights_path: str,
         if ov.shape == v.shape:
             own_sd[mk].copy_(v)
             loaded += 1
-        elif ov.dim() == v.dim() and ov.shape[1] == 5 and v.shape[1] == 3:
+        elif (ov.dim() == 4 and v.dim() == 4
+              and ov.shape[1] == 5 and v.shape[1] == 3):
             # 第一层卷积 3→5 通道：前 3 通道用预训练，后 2 通道用小随机
             with torch.no_grad():
                 own_sd[mk][:, :3].copy_(v)
