@@ -75,9 +75,12 @@ def create_val_split(data_root, val_split=0.15, seed=42):
         src_dir = train_dir / modal
         dst_dir = val_dir / modal
         dst_dir.mkdir(parents=True, exist_ok=True)
+        # labels 是 .txt，图片是常见图片扩展名
+        exts = [".txt"] if modal == "labels" else \
+            [".png", ".jpg", ".jpeg", ".bmp", ".PNG", ".JPG"]
         for stem in val_stems:
             # 查找源文件（兼容多扩展名）
-            for ext in [".png", ".jpg", ".jpeg", ".bmp", ".PNG", ".JPG"]:
+            for ext in exts:
                 src = src_dir / f"{stem}{ext}"
                 if src.exists():
                     dst = dst_dir / src.name

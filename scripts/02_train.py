@@ -21,13 +21,14 @@ import os
 import sys
 import time
 import math
+import random
 import copy
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -308,6 +309,8 @@ def main():
     parser.add_argument("--fusion_mode", default="", help="覆盖配置中的融合策略")
     parser.add_argument("--stage1_only", action="store_true", help="仅训练第一阶段")
     parser.add_argument("--data_root", default="", help="覆盖配置中的数据路径")
+    parser.add_argument("--subset_ratio", type=float, default=1.0,
+                        help="训练数据使用比例 (0,1]，如 0.3 表示只用 30% 数据做快速实验")
     args = parser.parse_args()
 
     # 加载配置
@@ -349,6 +352,14 @@ def main():
         data_root=data_root, split="val", img_size=cfg["img_size"],
         use_aux=False, is_training=False, cache_processed=False,
     ) if get_aligned_stems_safe(data_root, "val") else None
+
+    # ---- 数据子集（快速实验用）----
+    if 0 < args.subset_ratio < 1.0:
+        n_total = len(train_ds)
+        n_use = max(1, int(n_total * args.subset_ratio))
+        rng = random.Random(42)  # 固定种子，可复现
+        train_ds = Subset(train_ds, rng.sample(range(n_total), n_use))
+        print(f"  子集: 使用 {n_use}/{n_total} 样本 ({args.subset_ratio:.0%})")
 
     train_loader = DataLoader(
         train_ds, batch_size=cfg["batch_size"], shuffle=True,

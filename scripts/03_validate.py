@@ -177,10 +177,10 @@ def main():
     print(f"  权重: {args.weights}")
     print(f"  设备: {device}")
 
-    # 加载模型
+    # 加载模型（use_aux 需与训练时一致，否则 state_dict 不匹配）
     model = build_multimodal_model(
         fusion_mode=cfg["fusion_mode"], num_classes=cfg["num_classes"],
-        model_size=cfg["model_size"], use_aux=False,
+        model_size=cfg["model_size"], use_aux=cfg.get("use_aux", True),
     )
     model.to(device)
     model._init_strides()
