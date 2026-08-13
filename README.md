@@ -96,6 +96,9 @@ python scripts/02_train.py --config configs/train.yaml --stage1_only
 
 # 使用早期融合（快速对比）
 python scripts/02_train.py --config configs/train.yaml --fusion_mode early
+
+# 无 GPU 的 CPU 机器（小 batch / 单 worker / 关闭 AMP）
+python scripts/02_train.py --config configs/train_cpu.yaml
 ```
 
 ### 5. 验证
