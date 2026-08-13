@@ -112,5 +112,6 @@ def backbone_out_channels(model_size: str = "n") -> list:
         "n": [64, 128, 256],
         "s": [128, 256, 512],
         "m": [192, 384, 768],
+        "c": [256, 512, 768],   # YOLOv9c 等效通道
     }
     return cfg.get(model_size, cfg["n"])

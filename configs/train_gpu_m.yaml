@@ -96,7 +96,7 @@ augment:
   hsv_v: 0.4
   flip_lr: 0.5
   scale: 0.5
-  mosaic: 0.0
+  mosaic: 1.0               # 三模态 Mosaic 4 图拼接（训练前 80% epochs 启用）
   mixup: 0.0
   # 复制粘贴增强（弱类别平衡）：把球/三轮车/船/无人机等稀有对象随机注入训练图
   paste: true

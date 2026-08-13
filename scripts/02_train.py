@@ -77,9 +77,19 @@ class ModelEMA:
 # ============================================================
 # 学习率调度
 # ============================================================
-def build_scheduler(optimizer, cfg, total_steps):
-    """余弦退火 + 线性 Warmup"""
-    warmup_steps = cfg.get("warmup_epochs", 3) * 0  # 按需设置
+def build_scheduler(optimizer, cfg, total_steps, steps_per_epoch=None):
+    """余弦退火 + 线性 Warmup
+
+    Args:
+        total_steps: 当前阶段总步数 (steps_per_epoch * epochs)
+        steps_per_epoch: 每个 epoch 的步数（len(train_loader)）。
+            若为 None 则从 total_steps 和 warmup_epochs 推断（降级行为）。
+    """
+    if steps_per_epoch is None:
+        # 降级：warmup 按 epoch 数比例近似
+        warmup_steps = cfg.get("warmup_epochs", 3) * max(total_steps // 30, 1)
+    else:
+        warmup_steps = cfg.get("warmup_epochs", 3) * steps_per_epoch
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -154,7 +164,7 @@ def train_one_stage(model, loss_fn, train_loader, val_loader, optimizer,
 
     for epoch in range(start_epoch, epochs):
         model.train()
-        epoch_losses = {"total": 0, "cls": 0, "box": 0, "dfl": 0, "aux": 0}
+        epoch_losses = {"total": 0, "cls": 0, "box": 0, "dfl": 0, "aux": 0, "pgi": 0}
         t0 = time.time()
 
         for step, batch in enumerate(train_loader):
@@ -176,15 +186,35 @@ def train_one_stage(model, loss_fn, train_loader, val_loader, optimizer,
                 }
 
             # 前向 + 损失
+            is_v9 = hasattr(model, 'pgi_head')  # YOLOv9 GELAN 模型有 PGI 辅助头
             if scaler:
                 with torch.amp.autocast("cuda"):
-                    feats, aux_preds = model(rgb, ir, depth)
-                    losses = loss_fn(feats, gt, aux_preds, aux_targets)
+                    out = model(rgb, ir, depth)
+                    if is_v9 and isinstance(out, tuple) and len(out) == 3:
+                        feats, aux_preds, pgi_out = out
+                        losses = loss_fn(feats, gt, aux_preds, aux_targets)
+                        # PGI 辅助损失（用同一损失函数，不传 aux）
+                        pgi_losses = loss_fn(pgi_out, gt)
+                        pgi_w = cfg.get("loss", {}).get("pgi_weight", 0.1)
+                        losses["total"] = losses["total"] + pgi_w * pgi_losses["total"]
+                        losses["pgi"] = pgi_losses["total"].detach()
+                    else:
+                        feats, aux_preds = out if isinstance(out, tuple) and len(out) == 2 else (out, None)
+                        losses = loss_fn(feats, gt, aux_preds, aux_targets)
                 loss = losses["total"] / accum
                 scaler.scale(loss).backward()
             else:
-                feats, aux_preds = model(rgb, ir, depth)
-                losses = loss_fn(feats, gt, aux_preds, aux_targets)
+                out = model(rgb, ir, depth)
+                if is_v9 and isinstance(out, tuple) and len(out) == 3:
+                    feats, aux_preds, pgi_out = out
+                    losses = loss_fn(feats, gt, aux_preds, aux_targets)
+                    pgi_losses = loss_fn(pgi_out, gt)
+                    pgi_w = cfg.get("loss", {}).get("pgi_weight", 0.1)
+                    losses["total"] = losses["total"] + pgi_w * pgi_losses["total"]
+                    losses["pgi"] = pgi_losses["total"].detach()
+                else:
+                    feats, aux_preds = out if isinstance(out, tuple) and len(out) == 2 else (out, None)
+                    losses = loss_fn(feats, gt, aux_preds, aux_targets)
                 loss = losses["total"] / accum
                 loss.backward()
 
@@ -209,28 +239,31 @@ def train_one_stage(model, loss_fn, train_loader, val_loader, optimizer,
                 ek = "aux" if k == "aux" else k
                 src_key = "total_aux" if k == "aux" else k
                 if src_key in losses:
-                    epoch_losses[k] += losses[src_key].item()
+                    val = losses[src_key]
+                    epoch_losses[k] += val.item() if hasattr(val, 'item') else float(val)
 
             if (step + 1) % 50 == 0:
                 lr = optimizer.param_groups[0]["lr"]
                 mem = torch.cuda.memory_allocated() / 1024**3 if device.type == "cuda" else 0
+                pgi_str = f" pgi={losses.get('pgi', torch.tensor(0)).item():.4f}" if hasattr(model, 'pgi_head') else ""
                 print(f"    E{epoch} S{step+1}/{len(train_loader)} "
                       f"loss={losses['total'].item():.4f} "
                       f"cls={losses['cls'].item():.4f} "
                       f"box={losses['box'].item():.4f} "
                       f"dfl={losses['dfl'].item():.4f} "
-                      f"lr={lr:.6f} mem={mem:.1f}G")
+                      f"lr={lr:.6f} mem={mem:.1f}G{pgi_str}")
 
         # epoch 统计
         dt = time.time() - t0
         n = len(train_loader)
+        pgi_avg = f" pgi={epoch_losses.get('pgi', 0)/n:.4f}" if hasattr(model, 'pgi_head') else ""
         print(f"  [{stage_name}] E{epoch} avg: "
               f"total={epoch_losses['total']/n:.4f} "
               f"cls={epoch_losses['cls']/n:.4f} "
               f"box={epoch_losses['box']/n:.4f} "
               f"dfl={epoch_losses['dfl']/n:.4f} "
               f"aux={epoch_losses['aux']/n:.4f} "
-              f"({dt:.0f}s)")
+              f"({dt:.0f}s){pgi_avg}")
 
         # 验证
         eval_model = ema.ema if ema else model
@@ -317,7 +350,7 @@ def main():
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = PROJECT_ROOT / args.config
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     if args.fusion_mode:
@@ -352,6 +385,7 @@ def main():
         paste_classes=aug_cfg.get("paste_classes", None),
         paste_prob=aug_cfg.get("paste_prob", 0.5),
         paste_max_objs=aug_cfg.get("paste_max_objs", 2),
+        mosaic_prob=aug_cfg.get("mosaic", 0.0),
     )
     val_ds = MultiModalDataset(
         data_root=data_root, split="val", img_size=cfg["img_size"],
@@ -390,13 +424,18 @@ def main():
     # 预训练权重
     if cfg.get("pretrained", True) and not args.resume:
         try:
-            from ultralytics import YOLO
-            size_map = {"n": "yolov8n.pt", "s": "yolov8s.pt", "m": "yolov8m.pt"}
+            # 根据模型类型选择预训练权重
+            is_v9 = cfg["fusion_mode"] in ("stage_gate_v9", "stage_gate_gelan")
+            if is_v9:
+                size_map = {"c": "weights/yolov9c.pt", "s": "weights/yolov9c.pt",
+                            "m": "weights/yolov9c.pt", "n": "weights/yolov9c.pt"}
+            else:
+                size_map = {"n": "yolov8n.pt", "s": "yolov8s.pt", "m": "yolov8m.pt"}
             pt_name = size_map.get(cfg["model_size"], "yolov8n.pt")
             pt_path = cfg.get("pretrained_path", "") or pt_name
             load_pretrained_weights(model, pt_path)
         except Exception as e:
-            print(f"  ⚠ 预训练权重加载失败: {e}")
+            print(f"  [WARN] pretrained load failed: {e}")
 
     params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"  模型参数量: {params:.2f}M")
@@ -447,11 +486,18 @@ def main():
 
     if not args.stage1_only and stage2_epochs > 0:
         # 冻结共享主干参数（仅训练融合层/检测头/辅助头）
-        if cfg["fusion_mode"] == "stage_gate":
+        if cfg["fusion_mode"] in ("stage_gate", "stage_gate_v9", "stage_gate_gelan"):
             for p in model.body.parameters():
                 p.requires_grad = False
             for p in model.head.parameters():
                 p.requires_grad = True
+            # PGI 分支也冻结（v9 模型）
+            if hasattr(model, 'pgi_branch'):
+                for p in model.pgi_branch.parameters():
+                    p.requires_grad = False
+            if hasattr(model, 'pgi_head'):
+                for p in model.pgi_head.parameters():
+                    p.requires_grad = True
             for name, p in model.named_parameters():
                 if "stem" in name or "branch" in name or "fusion" in name or "aux" in name:
                     p.requires_grad = True
@@ -467,7 +513,8 @@ def main():
         optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=cfg["stage1_lr"], weight_decay=cfg.get("weight_decay", 5e-4))
-        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage1_epochs)
+        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage1_epochs,
+                                    steps_per_epoch=len(train_loader))
 
         best_map = train_one_stage(
             model, loss_fn, train_loader, val_loader, optimizer,
@@ -484,7 +531,8 @@ def main():
         optimizer = torch.optim.AdamW(
             model.parameters(), lr=cfg["stage2_lr"],
             weight_decay=cfg.get("weight_decay", 5e-4))
-        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage2_epochs)
+        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage2_epochs,
+                                    steps_per_epoch=len(train_loader))
 
         best_map = train_one_stage(
             model, loss_fn, train_loader, val_loader, optimizer,
@@ -495,7 +543,8 @@ def main():
         optimizer = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=cfg["stage1_lr"], weight_decay=cfg.get("weight_decay", 5e-4))
-        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage1_epochs)
+        scheduler = build_scheduler(optimizer, cfg, len(train_loader) * stage1_epochs,
+                                    steps_per_epoch=len(train_loader))
         best_map = train_one_stage(
             model, loss_fn, train_loader, val_loader, optimizer,
             scheduler, ema, device, cfg, "Stage1-only",

@@ -1,32 +1,32 @@
 # ========================================
-# 多模态目标检测 - GPU 训练配置（RTX 4060 Laptop 8GB）
-# 全量 1700 训练样本，两阶段 45 epochs，YOLOv8-s 骨架
+# 多模态目标检测 - GPU 训练配置 v3（YOLOv9c GELAN + PGI）
+# GELAN backbone + PGI 辅助分支 + Mosaic + 类别不平衡处理
 # ========================================
 
 # ---- 数据配置 ----
 data_root: "../dataset"
 img_size: 640
 num_classes: 12
-batch_size: 8            # 冒烟测试显存仅 1GB，yolov8s 可用 batch 8；配合 gradient_accum=2 等效 16
+batch_size: 4            # GELAN 参数较多，batch 降到 4；配合 gradient_accum=4 等效 16
 num_workers: 4
 val_split: 0.15
 
 # ---- 模型配置 ----
-fusion_mode: "stage_gate"
-model_size: "s"
-device: "cuda"            # GPU 训练
+fusion_mode: "stage_gate_v9"   # YOLOv9 GELAN + PGI
+model_size: "c"                # YOLOv9c 等效通道 [256, 512, 768]
+device: "cuda"
 pretrained: true
-pretrained_path: "weights/yolov8s.pt"
+pretrained_path: "weights/yolov9c.pt"
 resume: ""
 
 # ---- 模态配置 ----
 use_aux: true
 modal_dropout_prob: 0.3
 
-# ---- 两阶段训练（全量）----
-stage1_epochs: 15
+# ---- 两阶段训练 ----
+stage1_epochs: 20
 stage1_lr: 0.001
-stage2_epochs: 30
+stage2_epochs: 40
 stage2_lr: 0.0001
 
 # ---- 损失权重 ----
@@ -39,13 +39,19 @@ loss:
     depth_mask: 0.20
     depth_normal: 0.15
   total_aux: 0.15
+  # 类别不平衡处理
+  class_balance: true
+  class_max_ratio: 6.0
+  class_power: 0.5
+  # PGI 辅助损失权重
+  pgi_weight: 0.1
 
 # ---- 优化器 ----
 optimizer: "adamw"
 weight_decay: 0.0005
 grad_clip: 10.0
-gradient_accum: 2        # 等效 batch = 16
-amp: true                # 混合精度（GPU 关键加速）
+gradient_accum: 4        # 等效 batch = 16
+amp: true
 
 # ---- 学习率调度 ----
 lr_scheduler: "cosine"
@@ -53,18 +59,18 @@ warmup_epochs: 3
 
 # ---- 早停 ----
 early_stopping: true
-patience: 10
+patience: 12
 
 # ---- 验证 ----
 val_interval: 1
 ema: true
 
 # ---- 保存路径 ----
-checkpoint_dir: "weights/checkpoints"
-best_model_dir: "weights/best"
+checkpoint_dir: "weights/checkpoints_v9"
+best_model_dir: "weights/best_v9"
 log_dir: "outputs/logs"
 
-# ---- 类别名称（官方 12 类，顺序 = 类别 ID 0~11，禁止修改）----
+# ---- 类别名称 ----
 class_names:
   - "person"
   - "boat"
@@ -92,8 +98,13 @@ augment:
   hsv_v: 0.4
   flip_lr: 0.5
   scale: 0.5
-  mosaic: 1.0               # 三模态 Mosaic 4 图拼接（训练前 80% epochs 启用）
+  mosaic: 1.0               # 三模态 Mosaic 4 图拼接
   mixup: 0.0
+  # 复制粘贴增强
+  paste: true
+  paste_classes: [1, 7, 9, 10, 11]
+  paste_prob: 0.5
+  paste_max_objs: 2
 
 # ---- 推理配置 ----
 inference:

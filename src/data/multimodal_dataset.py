@@ -46,7 +46,8 @@ class MultiModalDataset(Dataset):
                  is_training: bool = True, cache_processed: bool = True,
                  flip_prob: float = 0.5, scale: float = 0.5, seed: int = 0,
                  paste_aug: bool = False, paste_classes=None,
-                 paste_prob: float = 0.5, paste_max_objs: int = 2):
+                 paste_prob: float = 0.5, paste_max_objs: int = 2,
+                 mosaic_prob: float = 0.0):
         self.data_root = Path(data_root)
         self.split = split
         self.img_size = img_size
@@ -62,6 +63,8 @@ class MultiModalDataset(Dataset):
         self.paste_prob = paste_prob
         self.paste_max_objs = paste_max_objs
         self._paste_pool = None  # 懒构建
+        # Mosaic 4 图拼接增强（三模态同步）
+        self.mosaic_prob = mosaic_prob if is_training else 0.0
 
         self.split_dir = self.data_root / split
         self.rgb_dir = self.split_dir / MODALITY_DIRS["rgb"]
@@ -96,27 +99,36 @@ class MultiModalDataset(Dataset):
     def __getitem__(self, idx):
         stem = self.stems[idx]
 
-        # ---- 加载三模态 ----
-        rgb = load_rgb(find_file(self.rgb_dir, stem))
-        ir = load_ir(find_file(self.ir_dir, stem))
-        depth = load_depth(find_file(self.depth_dir, stem))
-
-        # ---- 加载标签（YOLO 归一化，相对原图）----
-        labels = np.zeros((0, 5), dtype=np.float32)
-        if self.split != "test":
-            labels = load_labels(self.label_dir / f"{stem}.txt")
-        orig_shape = rgb.shape[:2]
-
-        # ---- 三模态同步 letterbox ----
-        rgb_l, ir_l, dp_l, scale, dw, dh = sync_letterbox(
-            rgb, ir, depth, (self.img_size, self.img_size))
-        rgb, ir, depth = rgb_l, ir_l, dp_l
-
-        # ---- 标签 → letterbox 像素 xyxy（增强与损失统一在 640 像素空间）----
-        if len(labels) > 0:
-            xyxy = yolo_to_xyxy(labels, scale, dw, dh, orig_shape)  # [N,5] cls+xyxy
+        # ---- Mosaic 4 图拼接（三模态同步）----
+        if self.is_training and self.mosaic_prob > 0 and np.random.rand() < self.mosaic_prob:
+            rgb, ir, depth, xyxy, orig_shape = self._mosaic_load(idx)
+            # mosaic 后标签已在 640 像素空间 xyxy，跳过 letterbox
+            # 保留原始标签用于元数据（可视化/提交参考）
+            labels = np.zeros((0, 5), dtype=np.float32)
+            if self.split != "test":
+                labels = load_labels(self.label_dir / f"{stem}.txt")
         else:
-            xyxy = np.zeros((0, 5), dtype=np.float32)
+            # ---- 标准加载 ----
+            rgb = load_rgb(find_file(self.rgb_dir, stem))
+            ir = load_ir(find_file(self.ir_dir, stem))
+            depth = load_depth(find_file(self.depth_dir, stem))
+
+            # ---- 加载标签（YOLO 归一化，相对原图）----
+            labels = np.zeros((0, 5), dtype=np.float32)
+            if self.split != "test":
+                labels = load_labels(self.label_dir / f"{stem}.txt")
+            orig_shape = rgb.shape[:2]
+
+            # ---- 三模态同步 letterbox ----
+            rgb_l, ir_l, dp_l, scale, dw, dh = sync_letterbox(
+                rgb, ir, depth, (self.img_size, self.img_size))
+            rgb, ir, depth = rgb_l, ir_l, dp_l
+
+            # ---- 标签 → letterbox 像素 xyxy（增强与损失统一在 640 像素空间）----
+            if len(labels) > 0:
+                xyxy = yolo_to_xyxy(labels, scale, dw, dh, orig_shape)  # [N,5] cls+xyxy
+            else:
+                xyxy = np.zeros((0, 5), dtype=np.float32)
 
         # ---- 训练时同步增强（像素空间）----
         if self.is_training:
@@ -365,6 +377,125 @@ class MultiModalDataset(Dataset):
         if new_rows:
             xyxy = np.concatenate([xyxy, np.array(new_rows, dtype=np.float32)], 0)
         return rgb, ir, depth, xyxy
+
+    # ==================== Mosaic 4 图拼接增强 ====================
+
+    def _mosaic_load(self, idx):
+        """
+        三模态同步 Mosaic-4 增强：
+          1. 随机选 4 张图（含当前 idx），各自 letterbox 到 s x s
+          2. 拼接到 2s x 2s 画布，随机中心点裁剪回 s x s
+          3. 标签同步偏移+裁剪
+
+        Returns:
+            rgb: [s, s, 3] uint8
+            ir:  [s, s]    (uint8/uint16)
+            depth: [s, s]  float32
+            xyxy: [N, 5]   (cls, x1, y1, x2, y2) 在 s x s 像素空间
+            orig_shape: (s, s)  mosaic 合成图尺寸
+        """
+        s = self.img_size
+        s2 = s * 2
+
+        # 随机选 4 个索引（当前 + 3 随机）
+        indices = [idx] + [random.randint(0, len(self.stems) - 1) for _ in range(3)]
+
+        # 加载并 letterbox 4 张图
+        samples = []
+        for i in indices:
+            stem_i = self.stems[i]
+            rgb_i = load_rgb(find_file(self.rgb_dir, stem_i))
+            ir_i = load_ir(find_file(self.ir_dir, stem_i))
+            dp_i = load_depth(find_file(self.depth_dir, stem_i))
+            lbl_i = np.zeros((0, 5), dtype=np.float32)
+            if self.split != "test":
+                lbl_i = load_labels(self.label_dir / f"{stem_i}.txt")
+            orig_i = rgb_i.shape[:2]
+            rgb_l, ir_l, dp_l, scale, dw, dh = sync_letterbox(
+                rgb_i, ir_i, dp_i, (s, s))
+            if len(lbl_i) > 0:
+                xyxy_i = yolo_to_xyxy(lbl_i, scale, dw, dh, orig_i)
+            else:
+                xyxy_i = np.zeros((0, 5), dtype=np.float32)
+            samples.append((rgb_l, ir_l, dp_l, xyxy_i))
+
+        # 随机中心点（保证裁剪区在画布内）
+        xc = int(random.uniform(s * 0.5, s * 1.5))
+        yc = int(random.uniform(s * 0.5, s * 1.5))
+
+        # 创建 2s x 2s 画布
+        rgb_m = np.full((s2, s2, 3), 114, dtype=np.uint8)
+        ir_m = np.full((s2, s2), 0, dtype=samples[0][1].dtype)
+        dp_m = np.full((s2, s2), 0, dtype=samples[0][2].dtype)
+
+        all_xyxy = []
+
+        # 4 图放置偏移：左上、右上、左下、右下
+        placements = [
+            (xc - s, yc - s),  # 0: top-left
+            (xc,      yc - s),  # 1: top-right
+            (xc - s,  yc),      # 2: bottom-left
+            (xc,      yc),      # 3: bottom-right
+        ]
+
+        for i, (rgb_i, ir_i, dp_i, xyxy_i) in enumerate(samples):
+            ox, oy = placements[i]
+            h, w = rgb_i.shape[:2]
+
+            # 计算源/目标区域（裁剪到画布内）
+            src_x1 = max(0, -ox)
+            src_y1 = max(0, -oy)
+            dst_x1 = max(0, ox)
+            dst_y1 = max(0, oy)
+            src_x2 = min(w, s2 - ox)
+            src_y2 = min(h, s2 - oy)
+            dst_x2 = dst_x1 + (src_x2 - src_x1)
+            dst_y2 = dst_y1 + (src_y2 - src_y1)
+
+            if src_x2 <= src_x1 or src_y2 <= src_y1:
+                continue
+
+            # 粘贴三模态
+            rgb_m[dst_y1:dst_y2, dst_x1:dst_x2] = rgb_i[src_y1:src_y2, src_x1:src_x2]
+            ir_m[dst_y1:dst_y2, dst_x1:dst_x2] = ir_i[src_y1:src_y2, src_x1:src_x2]
+            dp_m[dst_y1:dst_y2, dst_x1:dst_x2] = dp_i[src_y1:src_y2, src_x1:src_x2]
+
+            # 标签偏移
+            if len(xyxy_i) > 0:
+                shifted = xyxy_i.copy()
+                shifted[:, 1] += ox  # x1
+                shifted[:, 2] += oy  # y1
+                shifted[:, 3] += ox  # x2
+                shifted[:, 4] += oy  # y2
+                all_xyxy.append(shifted)
+
+        # 中心裁剪 s x s
+        cx1 = xc - s // 2
+        cy1 = yc - s // 2
+        cx2 = cx1 + s
+        cy2 = cy1 + s
+
+        rgb_out = rgb_m[cy1:cy2, cx1:cx2]
+        ir_out = ir_m[cy1:cy2, cx1:cx2]
+        dp_out = dp_m[cy1:cy2, cx1:cx2]
+
+        # 标签转到裁剪后空间
+        if all_xyxy:
+            xyxy_out = np.concatenate(all_xyxy, 0).astype(np.float32)
+            xyxy_out[:, 1] -= cx1
+            xyxy_out[:, 2] -= cy1
+            xyxy_out[:, 3] -= cx1
+            xyxy_out[:, 4] -= cy1
+            # 过滤无效框
+            valid = ((xyxy_out[:, 3] > xyxy_out[:, 1]) &
+                     (xyxy_out[:, 4] > xyxy_out[:, 2]) &
+                     (xyxy_out[:, 1] < s) & (xyxy_out[:, 2] < s) &
+                     (xyxy_out[:, 3] > 0) & (xyxy_out[:, 4] > 0))
+            xyxy_out = xyxy_out[valid]
+        else:
+            xyxy_out = np.zeros((0, 5), dtype=np.float32)
+
+        return rgb_out, ir_out, dp_out, xyxy_out, (s, s)
 
     # ==================== 伪模态 ====================
 
