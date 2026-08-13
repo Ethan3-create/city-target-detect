@@ -45,3 +45,5 @@ desktop.ini
 # Temporary
 *.tmp
 *.log
+*.tmp*
+.tmp_*

@@ -160,7 +160,7 @@ def main():
     config_path = Path(args.config)
     if not config_path.is_absolute():
         config_path = PROJECT_ROOT / args.config
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     if args.data_root:
         cfg["data_root"] = args.data_root

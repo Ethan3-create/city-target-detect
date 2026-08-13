@@ -89,7 +89,7 @@ def export_submission(predictions_path, output_zip="submission.zip", max_det=100
         for txt_file in sorted(tmp_dir.glob("*.txt")):
             zf.write(str(txt_file), txt_file.name)
 
-    print(f"\n  ✓ 提交文件已生成: {output_zip}")
+    print(f"\n  [OK] 提交文件已生成: {output_zip}")
     print(f"  文件大小: {output_zip.stat().st_size / 1024:.1f} KB")
     print(f"  包含 {len(txt_results)} 个 TXT 文件")
 
