@@ -179,7 +179,7 @@ def load_pretrained_weights(model: nn.Module, weights_path: str,
     """
     import numpy as np
 
-    ckpt = torch.load(weights_path, map_location="cpu")
+    ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
     if isinstance(ckpt, dict) and "model" in ckpt:
         pt_model = ckpt["model"]
         sd = pt_model.state_dict() if hasattr(pt_model, "state_dict") else pt_model

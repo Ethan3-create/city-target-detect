@@ -37,6 +37,17 @@ from src.utils.preprocessing import (
 )
 
 
+def _write_val_stems(data_root):
+    """从 val/ 目录实际文件生成 val_stems.txt 清单（供训练集排除）"""
+    data_root = Path(data_root)
+    val_stems = get_aligned_stems(data_root, "val")
+    val_list_path = data_root / "val_stems.txt"
+    with open(val_list_path, "w") as f:
+        for stem in sorted(val_stems):
+            f.write(stem + "\n")
+    print(f"  ✓ 清单已更新: {val_list_path} ({len(val_stems)} 个验证样本)")
+
+
 def create_val_split(data_root, val_split=0.15, seed=42):
     """
     从 train/ 划分 val/（使用硬链接，不占用额外磁盘空间）
@@ -49,6 +60,8 @@ def create_val_split(data_root, val_split=0.15, seed=42):
         val_count = len(get_aligned_stems(data_root, "val"))
         if val_count > 0:
             print(f"  val/ 已存在 ({val_count} 样本)，跳过划分")
+            # 重新生成清单（可能因中断缺失），保证数据集加载时可排除
+            _write_val_stems(data_root)
             return
 
     stems = get_aligned_stems(data_root, "train")
@@ -70,22 +83,15 @@ def create_val_split(data_root, val_split=0.15, seed=42):
                     dst = dst_dir / src.name
                     if not dst.exists():
                         try:
-                            os.link(str(src), str(dst))  # 硬链接
+                            os.link(str(src), str(dst))  # 硬链接（零拷贝）
                         except OSError:
                             os.symlink(str(src), str(dst))  # 回退到符号链接
                     break
 
-    # 从 train/ 中移除已划分到 val/ 的文件（仅移除硬链接，不删原文件）
-    for stem in val_stems:
-        for modal in ["visible", "infrared", "depth", "labels"]:
-            src_dir = train_dir / modal
-            for ext in [".png", ".jpg", ".jpeg", ".bmp", ".PNG", ".JPG"]:
-                src = src_dir / f"{stem}{ext}"
-                if src.exists():
-                    os.unlink(str(src))
-                    break
-
-    print("  ✓ val/ 划分完成")
+    # 注意：不删除 train/ 中的源文件（硬链接共享同一 inode，删除会破坏原数据）。
+    # 改为写入 val_stems.txt 清单，训练数据集加载时据此排除，避免数据泄漏。
+    _write_val_stems(data_root)
+    print("    提示: train/ 目录仍含 val 样本的硬链接，MultiModalDataset 会依据 val_stems.txt 自动排除")
 
 
 def run_eda(data_root):

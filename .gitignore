@@ -26,7 +26,8 @@ runs/
 wandb/
 
 # Data (do not upload dataset)
-data/
+# 仅忽略根目录 data/（勿用裸 data/，否则会误伤 src/data/ 源码）
+/data/
 *.zip
 !requirements.txt
 
