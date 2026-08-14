@@ -7,7 +7,7 @@
 data_root: "../dataset"
 img_size: 640
 num_classes: 12
-batch_size: 4            # GELAN 参数较多，batch 降到 4；配合 gradient_accum=4 等效 16
+batch_size: 8            # RTX 4060 8GB, AMP; 配合 gradient_accum=2 等效 16
 num_workers: 4
 val_split: 0.15
 
@@ -50,7 +50,7 @@ loss:
 optimizer: "adamw"
 weight_decay: 0.0005
 grad_clip: 10.0
-gradient_accum: 4        # 等效 batch = 16
+gradient_accum: 2        # 等效 batch = 16
 amp: true
 
 # ---- 学习率调度 ----

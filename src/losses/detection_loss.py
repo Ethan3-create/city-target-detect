@@ -103,7 +103,7 @@ class _TALAssigner(nn.Module):
         within_idx = torch.arange(len(gt_labels), device=device) - offsets[batch_idx]
 
         gt_labels_batch[batch_idx, within_idx, 0] = gt_labels
-        gt_bboxes_batch[batch_idx, within_idx] = boxes
+        gt_bboxes_batch[batch_idx, within_idx] = boxes.to(gt_bboxes_batch.dtype)
 
         # 有效 GT 掩码（零框为 padding）
         mask_gt = gt_bboxes_batch.sum(2, keepdim=True).gt_(0.0)  # [bs, n_max, 1]
@@ -231,6 +231,11 @@ class MultiModalDetectionLoss(nn.Module):
         """
         (pred_distri, pred_scores, pred_bboxes,
          anchor_feat, anchor_pix, stride_tensor) = self._decode(feats)
+
+        # AMP 安全：将预测统一转 float32，避免 Half/Float 混合导致的 dtype 不匹配
+        pred_distri = pred_distri.float()
+        pred_scores = pred_scores.float()
+        pred_bboxes = pred_bboxes.float()
 
         gt_labels = batch["cls"].to(self.device).long()
         gt_boxes = batch["bboxes"].to(self.device).float()
